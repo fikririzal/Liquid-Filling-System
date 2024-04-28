@@ -2,6 +2,7 @@
 #include <digitalWriteFast.h>
 #include <Keypad.h>
 #include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
 
 LiquidCrystal_I2C lcd(0x27, 16, 2); // set the LCD address to 0x27 for a 16 chars and 2 line display
 
@@ -13,19 +14,25 @@ char keys[ROWS][COLS] = {
     {'7', '8', '9', 'C'},
     {'*', '0', '#', 'D'}};
 
-byte rowPins[ROWS] = {12, 10, 9, 8}; // connect to the row pinouts of the keypad
+byte rowPins[ROWS] = {14, 15, 9, 8}; // connect to the row pinouts of the keypad
 byte colPins[COLS] = {7, 6, 5, 4};   // connect to the column pinouts of the keypad
 
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 #define ledPin 13
+
+// EEPROM Addres
+#define EE_cal 0
+#define EE_dspVol 4
+#define EE_pumpPow 8
 
 // Type Variable
 #define charLenght 5
 uint8_t typeIndex = 0;
 char typeArray[charLenght] = "0";
 char emptytypeArray[charLenght] = "";
-const char empty[charLenght] = "";
+const char empty[charLenght] = "0";
 uint32_t typeInteger = 0;
+uint8_t displayIndex = 0;
 
 // PWM
 #define PWMpin 11
@@ -51,10 +58,13 @@ volatile double targetVolume = 0;
 volatile double currentVolume = 0;
 volatile double dsp_currentVolume = 0;
 
+// Pricing Variable
+
 // Filling System Variable
 bool Filling = false;
 volatile bool Pumping = false;
 uint8_t maxPower = 100;
+uint8_t pumpPower = 100;
 
 // Program Selector Variabel
 #define IDLE 0xA1
@@ -91,6 +101,14 @@ void setup()
 
   lcd.init();
   lcd.backlight();
+
+  float i = 0.0;
+  EEPROM.get(EE_cal, i);
+  CallibrationFactor = i;
+  double x = 0.0;
+  EEPROM.get(EE_dspVol, x);
+  dsp_currentVolume = x;
+  EEPROM.get(EE_pumpPow, pumpPower);
 
   setupPWM(topPWM);
   pinModeFast(ledPin, OUTPUT); // Sets the digital pin as output.
@@ -176,52 +194,74 @@ void loop()
 void typeHandler()
 {
   char key = keypad.getKey();
-  switch (key)
+  switch (displayIndex)
   {
-  case '*':
-    if (isTypeArrayEmpty())
+  case 0:
+    switch (key)
     {
-      // Serial.println("typeArray empty, procced pumping");
-      Status2pumping();
-      break;
-    }
-    typeArray2uint32(&typeInteger);
-    if (typeInteger < 100)
-    {
+    case '#':
+      if (isTypeArrayEmpty())
+      {
+        // Serial.println("typeArray empty, procced pumping");
+        Status2pumping();
+        break;
+      }
+      typeArray2uint32(&typeInteger);
+      if (typeInteger < 100)
+      {
+        clearTypeArray();
+        // Serial.println("typeInteger is to low below 100");
+      }
+
       clearTypeArray();
-      // Serial.println("typeInteger is to low below 100");
-    }
-
-    clearTypeArray();
-    /* Serial.print("typeInteger[mL]: ");
-    Serial.println(typeInteger); */
-    Status2filling(typeInteger);
-    // Serial.println("typeArray cleared");
-    break;
-
-  case '#':
-    if (isTypeArrayEmpty())
-    {
-      // Serial.println("typeArray empty");
+      /* Serial.print("typeInteger[mL]: ");
+      Serial.println(typeInteger); */
+      Status2filling(typeInteger);
+      // Serial.println("typeArray cleared");
       break;
-    }
-    clearTypeArray();
-    // Serial.println("typeArray cleared");
-    break;
-  case 'A':
-    CallibrationFactor = CallibrationFactor + 0.1;
-    break;
 
-  case 'B':
-    CallibrationFactor = CallibrationFactor - 0.1;
-    break;
+    case '*':
+      if (isTypeArrayEmpty())
+      {
+        // Serial.println("typeArray empty");
+        break;
+      }
+      clearTypeArray();
+      // Serial.println("typeArray cleared");
+      break;
 
-  default:
-    if (key != '\0')
-    {
-      input2typeArray(key);
-      Serial.println(key);
-      /*Serial.println(" pressed"); */
+    case 'A':
+      CallibrationFactor = CallibrationFactor + 0.1;
+      EEPROM.put(EE_cal, CallibrationFactor);
+      Serial.println(CallibrationFactor);
+      break;
+
+    case 'B':
+      CallibrationFactor = CallibrationFactor - 0.1;
+      EEPROM.put(EE_cal, CallibrationFactor);
+      Serial.println(CallibrationFactor);
+      break;
+
+    case 'C':
+      pumpPower = pumpPower > 97 ? pumpPower = 100 : pumpPower + 2;
+      EEPROM.put(EE_pumpPow, pumpPower);
+      Serial.println(pumpPower);
+      break;
+
+    case 'D':
+      pumpPower = pumpPower < 33 ? pumpPower = 30 : pumpPower - 2;
+      EEPROM.put(EE_pumpPow, pumpPower);
+      Serial.println(pumpPower);
+      break;
+
+    default:
+      if (key != '\0')
+      {
+        input2typeArray(key);
+        Serial.println(key);
+        /*Serial.println(" pressed"); */
+      }
+      break;
     }
     break;
   }
@@ -231,12 +271,13 @@ void display()
 {
   static char flow_buffer[8] = "";
   static char call_buffer[8] = "";
+  static char pumpPower_buffer[8] = "";
   static char f_current_buffer[20] = "";
   static char f_target_buffer[30] = "";
   static char f_flow_buffer[20] = "";
 
   dtostrf(LperMinute, 2, 2, flow_buffer);
-  dtostrf(CallibrationFactor, 2, 2, call_buffer);
+  dtostrf(CallibrationFactor, 2, 1, call_buffer);
 
   if (Status == IDLE)
   {
@@ -247,21 +288,33 @@ void display()
     sprintf(f_target_buffer, "%dmL     ", uint16_t(targetVolume));
   }
 
-  sprintf(f_current_buffer, "%dmL     ", uint16_t(dsp_currentVolume));
+  sprintf(f_current_buffer, "%dmL    ", uint16_t(dsp_currentVolume));
   // sprintf(f_target_buffer, "%dmL     ", uint16_t(targetVolume));
   sprintf(f_flow_buffer, "%sL/m     ", flow_buffer);
+  sprintf(pumpPower_buffer, "%d    ", pumpPower);
 
-  lcd.setCursor(0, 0);
-  lcd.print(f_current_buffer);
+  switch (displayIndex)
+  {
+  case 0:
+    lcd.setCursor(0, 0);
+    lcd.print(f_current_buffer);
 
-  lcd.setCursor(0, 1);
-  lcd.print(f_target_buffer);
+    lcd.setCursor(0, 1);
+    lcd.print(f_target_buffer);
 
-  lcd.setCursor(16 - (strlen(f_flow_buffer) - 5), 1);
-  lcd.print(f_flow_buffer);
+    lcd.setCursor(16 - (strlen(f_flow_buffer) - 5), 1);
+    lcd.print(f_flow_buffer);
 
-  lcd.setCursor(16 - (strlen(call_buffer)), 0);
-  lcd.print(call_buffer);
+    lcd.setCursor(9, 0);
+    lcd.print(pumpPower_buffer);
+
+    lcd.setCursor(16 - (strlen(call_buffer)), 0);
+    lcd.print(call_buffer);
+    break;
+
+  default:
+    break;
+  }
 }
 
 void EmergencyStop()
@@ -279,6 +332,7 @@ void Status2Idle()
   Status = IDLE;
   targetVolume = 0;
   stopTimer1();
+  EEPROM.put(EE_dspVol, dsp_currentVolume);
 }
 
 void Status2filling(uint32_t inputValue)
@@ -316,7 +370,7 @@ void ControlSystem()
   {
     if (Pumping)
     {
-      writePWM(maxPower, true);
+      writePWM(pumpPower, true);
     }
     else
     {
@@ -333,11 +387,11 @@ void ControlSystem()
     else */
     if (currentVolume < offsetVolume)
     {
-      writePWM(70, true);
+      writePWM(pumpPower < 60 ? 30 : pumpPower - 30, true);
     }
     else
     {
-      writePWM(maxPower, true);
+      writePWM(pumpPower, true);
     }
   }
 }
@@ -368,7 +422,10 @@ void typeArray2uint32(uint32_t *variabel)
 
 uint8_t isTypeArrayEmpty()
 {
-  return strcmp(empty, typeArray) == 0 ? 1 : 0;
+  int8_t i = 0;
+  i = strcmp(empty, typeArray);
+  Serial.println(i);
+  return i == 0 ? 1 : 0;
 }
 
 void writePWM(uint8_t percentage, boolean smooth)
